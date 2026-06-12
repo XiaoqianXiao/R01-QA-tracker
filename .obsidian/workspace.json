@@ -4,11 +4,11 @@
     "type": "split",
     "children": [
       {
-        "id": "498518a382cc74ee",
+        "id": "97f152d1f9023777",
         "type": "tabs",
         "children": [
           {
-            "id": "d4aeb596c16631b5",
+            "id": "11f25567ca179519",
             "type": "leaf",
             "state": {
               "type": "empty",
@@ -176,14 +176,15 @@
       "bases:Create new base": false
     }
   },
-  "active": "d4aeb596c16631b5",
+  "active": "11f25567ca179519",
   "lastOpenFiles": [
+    "SESSION_NOTE/2026-06-12_v1.md",
     "PROJECT_CONTEXT.md",
-    "data/~$Instruments_in_each_Session_each_Arm.xlsx",
     "results/~$QA_summary_arm1.xlsx",
     "code/__pycache__/qa_summary.cpython-311.pyc",
     "code/__pycache__",
     "code/qa_summary.py",
+    "data/~$Instruments_in_each_Session_each_Arm.xlsx",
     "PROJECT_CONTEXT_full.md",
     "SESSION_NOTE/2026-06-10_v1.md",
     "SESSION_NOTE/2026-06-09_v1.md",

@@ -485,6 +485,7 @@ complete_NofSubjects
 review_required_NofSubjects
 complete_rate
 missing_rate
+missing_subjects #list subjects who did not complete that session
 ```
 
 Order rows by:
@@ -507,6 +508,7 @@ complete_NofRecords #only subject completed all required sessions for that instr
 review_required_NofRecords
 complete_rate
 missing_rate
+missing_subjects #list subjects who did not complete that instrument
 ```
 
 
@@ -523,6 +525,7 @@ missing_NofSubjects
 review_required_NofSubjects
 complete_rate
 missing_rate
+missing_subjects #list subjects who did not complete ANT for theat session
 ```
 
 ### Table 3-2. ANT task complete rate by subject
@@ -537,6 +540,7 @@ missing_NofSubjects
 review_required_NofSubjects
 complete_rate
 missing_rate
+missing_subjects #list subjects who did not complete all ANT
 ```
 ### Table 4-1. SelfOthers QC pass rate by session
 
@@ -552,6 +556,7 @@ missing_NofSubjects
 review_required_NofSubjects
 qc_pass_rate
 missing_rate
+missing_subjects #list subjects who did not pass selfOthers QC for that session
 ```
 ### Table 4-2. SelfOthers QC pass rate by subject
 
@@ -566,6 +571,7 @@ missing_NofSubjects
 review_required_NofSubjects
 qc_pass_rate
 missing_rate
+missing_subjects #list subjects who did not pass selfOthers QC
 ```
 ### Table 5. MRI QC pass rate by session
 
@@ -581,6 +587,7 @@ missing_NofSubjects
 review_required_NofSubjects
 qc_pass_rate
 missing_rate
+missing_subjects #list subjects who did not pass MRI QC for that session
 ```
 ### Table 5-2. MRI QC pass rate by subject
 
@@ -596,6 +603,7 @@ missing_NofSubjects
 review_required_NofSubjects
 qc_pass_rate
 missing_rate
+missing_subjects #list subjects who did not pass MRI QC
 ```
 
 
@@ -609,6 +617,7 @@ Columns:
 arm
 session
 completed_NofSubjects
+missing_subjects #list subjects who did not complete that session
 valid_interval_NofSubjects
 invalid_interval_NofSubjects
 mean_intervalFromBaseline_weeks
@@ -625,6 +634,7 @@ arm
 total_NofSubjects
 withdrawn_or_dropout_NofSubjects
 withdrawn_or_dropout_rate
+dropout_subjects #list subjects who dropout
 complete_all_experiment_sessions_NofSubjects
 complete_all_experiment_sessions_rate
 complete_all_instrument_NofSubjects
@@ -637,6 +647,7 @@ all_selfOther_QC_passed_NofSubjects
 all_selfOther_QC_passed_rate
 QC_pass_NofSubjects_rate
 QC_passrate
+missing_subjects #list subjects who did pass all QC
 ```
 
 ---
