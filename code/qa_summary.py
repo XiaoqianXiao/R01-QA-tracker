@@ -1384,6 +1384,30 @@ def table_readiness(arm: str, subject_wise: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def table_asap_summary(arm: str, subject_wise: pd.DataFrame) -> pd.DataFrame:
+    total = len(subject_wise)
+    asap_counts = pd.to_numeric(
+        subject_wise.get("total_ASAP_count", pd.Series([0] * total)),
+        errors="coerce",
+    ).fillna(0).astype(int)
+    row: dict[str, Any] = {"arm": arm, "total_NofSubjects": total}
+    for count in range(6):
+        row[f"{count}_ASAP_NofSubjects"] = int((asap_counts == count).sum())
+    return pd.DataFrame(
+        [row],
+        columns=[
+            "arm",
+            "total_NofSubjects",
+            "0_ASAP_NofSubjects",
+            "1_ASAP_NofSubjects",
+            "2_ASAP_NofSubjects",
+            "3_ASAP_NofSubjects",
+            "4_ASAP_NofSubjects",
+            "5_ASAP_NofSubjects",
+        ],
+    )
+
+
 def build_group_tables(
     arm: str,
     qn: pd.DataFrame,
@@ -1403,7 +1427,8 @@ def build_group_tables(
         ("Table 5. MRI QC pass rate by session", qc_table_by_session(arm, mri, "MRI")),
         ("Table 5-2. MRI QC pass rate by subject", qc_table_by_subject(arm, mri, "scan_or_run")),
         ("Table 6. Session interval summary after Baseline", table_interval_summary(arm, subject_wise, arm_sessions)),
-        ("Table 7. Participant-level QA readiness summary", table_readiness(arm, subject_wise)),
+        ("Table 7. ASAP summary", table_asap_summary(arm, subject_wise)),
+        ("Table 8. Participant-level QA readiness summary", table_readiness(arm, subject_wise)),
     ]
 
 
