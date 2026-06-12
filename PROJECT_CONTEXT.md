@@ -626,7 +626,20 @@ min_intervalFromBaseline_weeks
 max_intervalFromBaseline_weeks
 ```
 
-### Table 7. Participant-level QA readiness summary
+### Table 7. ASAP summary
+Columns:
+
+```text
+arm
+total_NofSubjects
+0_ASAP_NofSubjects
+1_ASAP_NofSubjects
+2_ASAP_NofSubjects
+3_ASAP_NofSubjects
+4_ASAP_NofSubjects
+5_ASAP_NofSubjects
+```
+### Table 8. Participant-level QA readiness summary
 Columns:
 
 ```text

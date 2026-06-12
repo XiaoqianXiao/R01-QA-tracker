@@ -59,6 +59,55 @@ MRI_FILES = {
 }
 CODEBOOK_FILES = ("Participants_REDCap.pdf", "Clini_REDCap.pdf")
 
+# ---------------------------------------------------------------------------
+# Configure expected sessions and instruments here.
+#
+# Default behavior follows PROJECT_CONTEXT.md exactly: required sessions and
+# expected instruments are read from the two design workbooks, and only
+# Included_in_summary == 1 instruments are included. The optional settings below
+# let a user narrow, exclude, or add expected items without changing processing
+# logic elsewhere in the script.
+#
+# Common examples:
+#   Keep only Baseline for every active arm:
+#       "required_sessions": {"include_only": ["Baseline"], ...}
+#   Keep only selected sessions for one arm:
+#       "required_sessions": {"include_only": {"arm1": ["Baseline", "T1"]}, ...}
+#   Exclude one expected instrument:
+#       "expected_instruments": {
+#           "exclude": [
+#               {"arm": "arm1", "session": "T12", "instrument": "SCID-5 T12"},
+#           ],
+#           ...
+#       }
+# ---------------------------------------------------------------------------
+QA_CONFIG: dict[str, Any] = {
+    # Which output arms to build. Leave as all three arms unless intentionally
+    # generating a subset.
+    "active_arms": ["arm1", "arm2", "arm3"],
+    "required_sessions": {
+        # If an arm is listed here, only these sessions are retained for that arm.
+        # Session names use final labels, e.g. "Baseline", "T1", "IE T3".
+        "include_only": ["Baseline"],
+        # Remove sessions after reading the design workbook.
+        "exclude": {},
+        # Add custom sessions. Each item may include arm, session, order,
+        # participant_event_name, and clinician_event_name.
+        "add": [],
+    },
+    "expected_instruments": {
+        # If an arm is listed here, only these configured instruments are retained
+        # for that arm. Shape: {"arm1": {"Baseline": ["PHQ-9", "GAD-7"]}}.
+        "include_only": {"arm1": {"Baseline": ["PHQ-9", "GAD-7"]}},
+        # Remove expected instruments after Included_in_summary == 1 filtering.
+        # Items may specify arm, session, instrument, and/or instrument_source.
+        "exclude": [],
+        # Add expected instruments. Each item requires arm, session, instrument,
+        # and instrument_source.
+        "add": [],
+    },
+}
+
 TRUE_VALUES = {"true", "1", "yes", "y"}
 FALSE_VALUES = {"false", "0", "no", "n"}
 COMPLETE_STATUSES = {"complete"}
@@ -220,6 +269,152 @@ def session_sort_key(session: str) -> int:
     if session.upper().startswith("ASAP"):
         return len(SESSION_ORDER) + 10
     return len(SESSION_ORDER) + 20
+
+
+def configured_arms(config: dict[str, Any]) -> list[str]:
+    arms = [clean(arm) for arm in config.get("active_arms", ARMS)]
+    return [arm for arm in arms if arm in ARMS]
+
+
+def configured_session_set(values: Iterable[Any]) -> set[str]:
+    if isinstance(values, str):
+        values = [values]
+    return {canonical_session(value) for value in values if clean(value)}
+
+
+def normalize_arm_session_config(value: Any, active_arms: Iterable[str]) -> dict[str, set[str]]:
+    if not value:
+        return {}
+    if isinstance(value, dict):
+        return {clean(arm): configured_session_set(sessions) for arm, sessions in value.items()}
+    sessions = configured_session_set(value)
+    return {arm: sessions for arm in active_arms}
+
+
+def normalize_expected_include_config(value: Any, active_arms: Iterable[str]) -> dict[str, dict[str, set[str]]]:
+    if not value:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(
+            "QA_CONFIG['expected_instruments']['include_only'] must be a dict, "
+            'for example {"arm1": {"Baseline": ["PHQ-9"]}}'
+        )
+    active = set(active_arms)
+    has_arm_keys = any(clean(key) in active for key in value)
+    if not has_arm_keys:
+        return {
+            arm: {canonical_session(session): {clean(item) for item in instruments} for session, instruments in value.items()}
+            for arm in active
+        }
+    normalized: dict[str, dict[str, set[str]]] = {}
+    for arm, by_session in value.items():
+        arm = clean(arm)
+        if not isinstance(by_session, dict):
+            raise ValueError(
+                f"QA_CONFIG expected_instruments.include_only for {arm} must map sessions to instrument lists"
+            )
+        normalized[arm] = {
+            canonical_session(session): {clean(item) for item in instruments}
+            for session, instruments in by_session.items()
+        }
+    return normalized
+
+
+def apply_required_session_config(
+    required_sessions: pd.DataFrame,
+    config: dict[str, Any],
+    log: ValidationLog,
+) -> pd.DataFrame:
+    session_config = config.get("required_sessions", {})
+    out = required_sessions.copy()
+    active = set(configured_arms(config))
+    out = out[out["arm"].isin(active)].copy()
+    include_only = normalize_arm_session_config(session_config.get("include_only", {}), active)
+    for arm, keep_sessions in include_only.items():
+        before = len(out)
+        out = out[(out["arm"] != arm) | (out["session"].isin(keep_sessions))].copy()
+        log.info(f"Config required_sessions.include_only {arm}: retained {len(out)} of {before} rows")
+    exclude = normalize_arm_session_config(session_config.get("exclude", {}), active)
+    for arm, drop_sessions in exclude.items():
+        before = len(out)
+        out = out[~((out["arm"] == arm) & (out["session"].isin(drop_sessions)))].copy()
+        log.info(f"Config required_sessions.exclude {arm}: removed {before - len(out)} rows")
+    additions = []
+    for item in session_config.get("add", []):
+        arm = clean(item.get("arm", ""))
+        session = canonical_session(item.get("session", ""))
+        if arm not in active or not session:
+            log.warn(f"Skipping invalid configured required session: {item}")
+            continue
+        additions.append(
+            {
+                "arm": arm,
+                "session": session,
+                "order": int(clean(item.get("order", "999")) or 999),
+                "participant_event_name": clean(item.get("participant_event_name", "")),
+                "clinician_event_name": clean(item.get("clinician_event_name", "")),
+            }
+        )
+    if additions:
+        out = pd.concat([out, pd.DataFrame(additions)], ignore_index=True)
+        log.info(f"Config required_sessions.add: added {len(additions)} rows")
+    out = out.drop_duplicates(["arm", "session"], keep="last").sort_values(["arm", "order"]).reset_index(drop=True)
+    return out
+
+
+def instrument_config_matches(row: pd.Series, rule: dict[str, Any]) -> bool:
+    for key in ("arm", "session", "instrument", "instrument_source"):
+        value = clean(rule.get(key, ""))
+        if not value:
+            continue
+        row_value = canonical_session(row[key]) if key == "session" else clean(row[key])
+        rule_value = canonical_session(value) if key == "session" else value
+        if row_value != rule_value:
+            return False
+    return True
+
+
+def apply_expected_instrument_config(
+    expected: pd.DataFrame,
+    required_sessions: pd.DataFrame,
+    config: dict[str, Any],
+    log: ValidationLog,
+) -> pd.DataFrame:
+    instrument_config = config.get("expected_instruments", {})
+    out = expected.copy()
+    active = set(configured_arms(config))
+    out = out[out["arm"].isin(active)].copy()
+    include_only = normalize_expected_include_config(instrument_config.get("include_only", {}), active)
+    for arm, by_session in include_only.items():
+        allowed: set[tuple[str, str]] = set()
+        for session, instruments in by_session.items():
+            for instrument in instruments:
+                allowed.add((session, clean(instrument)))
+        before = len(out)
+        out = out[
+            (out["arm"] != arm)
+            | out.apply(lambda row: (row["session"], row["instrument"]) in allowed, axis=1)
+        ].copy()
+        log.info(f"Config expected_instruments.include_only {arm}: retained {len(out)} of {before} rows")
+    for rule in instrument_config.get("exclude", []):
+        before = len(out)
+        out = out[~out.apply(lambda row: instrument_config_matches(row, rule), axis=1)].copy()
+        log.info(f"Config expected_instruments.exclude {rule}: removed {before - len(out)} rows")
+    required_by_arm = {arm: set(group["session"]) for arm, group in required_sessions.groupby("arm", sort=False)}
+    additions = []
+    for item in instrument_config.get("add", []):
+        arm = clean(item.get("arm", ""))
+        session = canonical_session(item.get("session", ""))
+        instrument = clean(item.get("instrument", ""))
+        source = clean(item.get("instrument_source", ""))
+        if arm not in active or session not in required_by_arm.get(arm, set()) or not instrument or not source:
+            log.warn(f"Skipping invalid configured expected instrument: {item}")
+            continue
+        additions.append({"arm": arm, "session": session, "instrument": instrument, "instrument_source": source})
+    if additions:
+        out = pd.concat([out, pd.DataFrame(additions)], ignore_index=True)
+        log.info(f"Config expected_instruments.add: added {len(additions)} rows")
+    return out.drop_duplicates(["arm", "session", "instrument", "instrument_source"]).reset_index(drop=True)
 
 
 def final_session_allowed(session: str) -> bool:
@@ -1249,8 +1444,16 @@ def build_outputs(input_dir: Path, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     log = ValidationLog()
     check_input_sidecars(input_dir, log)
+    active_arms = configured_arms(QA_CONFIG)
+    if not active_arms:
+        raise ValueError("QA_CONFIG active_arms did not include any valid arms")
+    log.info(f"Configured active arms: {', '.join(active_arms)}")
     required_sessions = load_required_sessions(input_dir, log)
+    required_sessions = apply_required_session_config(required_sessions, QA_CONFIG, log)
+    log.count("required_session_rows_after_config", len(required_sessions))
     expected = load_expected_instruments(input_dir, required_sessions, log)
+    expected = apply_expected_instrument_config(expected, required_sessions, QA_CONFIG, log)
+    log.count("included_expected_instrument_rows_after_config", len(expected))
     redcap = load_redcap(input_dir, required_sessions, log)
     mri_subjects = read_mri_subjects(input_dir, log)
     subjects = build_subject_arm_map(redcap, mri_subjects, log)
@@ -1258,7 +1461,7 @@ def build_outputs(input_dir: Path, output_dir: Path) -> None:
     beh = build_behavioral_long(redcap, subjects, required_sessions)
     mri = load_mri_long(input_dir, subjects, required_sessions, log)
     log.count("behavioral_rows_built", len(beh))
-    for arm in ARMS:
+    for arm in active_arms:
         arm_sessions = (
             required_sessions[
                 (required_sessions["arm"] == arm) & (required_sessions["session"].map(final_session_allowed))
