@@ -700,6 +700,24 @@ def status_counts(df: pd.DataFrame, status_col: str = "status") -> dict[str, int
     return {"complete": complete, "review_required": review, "missing": missing}
 
 
+def subject_list(values: Iterable[Any]) -> str:
+    subjects = sorted({clean(value) for value in values if clean(value)})
+    return "; ".join(subjects)
+
+
+def subjects_with_status(df: pd.DataFrame, statuses: set[str], status_col: str = "status") -> str:
+    if df.empty:
+        return ""
+    mask = df[status_col].fillna("").map(clean).isin(statuses)
+    return subject_list(df.loc[mask, "subject_id"])
+
+
+def subjects_from_series(series: pd.Series, statuses: set[str]) -> str:
+    if series.empty:
+        return ""
+    return subject_list(series[series.isin(statuses)].index)
+
+
 def rate(num: int, denom: int) -> float:
     return round(num / denom, 4) if denom else 0.0
 
@@ -877,6 +895,7 @@ def table_session_instrument_summary(arm: str, qn: pd.DataFrame) -> pd.DataFrame
                 "expected_NofSubjects": expected,
                 "complete_NofSubjects": counts["complete"],
                 "review_required_NofSubjects": counts["review_required"],
+                "missing_subjects": subjects_with_status(group, MISSING_STATUSES),
                 "complete_rate": rate(counts["complete"], expected),
                 "missing_rate": rate(counts["missing"], expected),
             }
@@ -889,6 +908,7 @@ def table_session_instrument_summary(arm: str, qn: pd.DataFrame) -> pd.DataFrame
         "expected_NofSubjects",
         "complete_NofSubjects",
         "review_required_NofSubjects",
+        "missing_subjects",
         "complete_rate",
         "missing_rate",
     ]
@@ -917,6 +937,7 @@ def table_instrument_summary(arm: str, qn: pd.DataFrame) -> pd.DataFrame:
                 "expected_NofSubjects": expected,
                 "complete_NofRecords": complete,
                 "review_required_NofRecords": review,
+                "missing_subjects": subjects_from_series(per_subject, MISSING_STATUSES),
                 "complete_rate": rate(complete, expected),
                 "missing_rate": rate(missing, expected),
             }
@@ -928,6 +949,7 @@ def table_instrument_summary(arm: str, qn: pd.DataFrame) -> pd.DataFrame:
         "expected_NofSubjects",
         "complete_NofRecords",
         "review_required_NofRecords",
+        "missing_subjects",
         "complete_rate",
         "missing_rate",
     ]
@@ -950,6 +972,7 @@ def table_ant_by_session(arm: str, beh: pd.DataFrame) -> pd.DataFrame:
                 "complete_NofSubjects": counts["complete"],
                 "missing_NofSubjects": counts["missing"],
                 "review_required_NofSubjects": counts["review_required"],
+                "missing_subjects": subjects_with_status(group, MISSING_STATUSES),
                 "complete_rate": rate(counts["complete"], expected),
                 "missing_rate": rate(counts["missing"], expected),
             }
@@ -961,6 +984,7 @@ def table_ant_by_session(arm: str, beh: pd.DataFrame) -> pd.DataFrame:
         "complete_NofSubjects",
         "missing_NofSubjects",
         "review_required_NofSubjects",
+        "missing_subjects",
         "complete_rate",
         "missing_rate",
     ]
@@ -984,6 +1008,7 @@ def table_ant_by_subject(arm: str, beh: pd.DataFrame) -> pd.DataFrame:
                 "complete_NofSubjects": complete,
                 "missing_NofSubjects": missing,
                 "review_required_NofSubjects": review,
+                "missing_subjects": subjects_from_series(per_subject, MISSING_STATUSES),
                 "complete_rate": rate(complete, expected),
                 "missing_rate": rate(missing, expected),
             }
@@ -1012,6 +1037,8 @@ def qc_table_by_session(arm: str, df: pd.DataFrame, source: str) -> pd.DataFrame
                 "qc_fail_NofSubjects": failed,
                 "missing_NofSubjects": missing,
                 "review_required_NofSubjects": review,
+                "missing_subjects": subjects_from_series(per_subject, {"missing"}),
+                "qc_fail_subjects": subjects_from_series(per_subject, {"fail"}),
                 "qc_pass_rate": rate(passed, expected),
                 "missing_rate": rate(missing, expected),
             }
@@ -1024,6 +1051,8 @@ def qc_table_by_session(arm: str, df: pd.DataFrame, source: str) -> pd.DataFrame
         "qc_fail_NofSubjects",
         "missing_NofSubjects",
         "review_required_NofSubjects",
+        "missing_subjects",
+        "qc_fail_subjects",
         "qc_pass_rate",
         "missing_rate",
     ]
@@ -1053,6 +1082,8 @@ def qc_table_by_subject(arm: str, df: pd.DataFrame, label_col: str | None = None
             "qc_fail_NofSubjects": failed,
             "missing_NofSubjects": missing,
             "review_required_NofSubjects": review,
+            "missing_subjects": subjects_from_series(per_subject, {"missing"}),
+            "qc_fail_subjects": subjects_from_series(per_subject, {"fail"}),
             "qc_pass_rate": rate(passed, expected),
             "missing_rate": rate(missing, expected),
         }
@@ -1066,6 +1097,8 @@ def qc_table_by_subject(arm: str, df: pd.DataFrame, label_col: str | None = None
         "qc_fail_NofSubjects",
         "missing_NofSubjects",
         "review_required_NofSubjects",
+        "missing_subjects",
+        "qc_fail_subjects",
         "qc_pass_rate",
         "missing_rate",
     ]
@@ -1099,18 +1132,32 @@ def table_interval_summary(arm: str, subject_wise: pd.DataFrame, sessions: Itera
                 "completed_NofSubjects": int(completed.sum()),
                 "valid_interval_NofSubjects": int(valid.sum()),
                 "invalid_interval_NofSubjects": int((completed & ~valid).sum()),
+                "invalid_or_missing_interval_subjects": subject_list(subject_wise.loc[completed & ~valid, "subject_id"]),
                 "mean_intervalFromBaseline_weeks": round(float(intervals[valid].mean()), 2) if valid.any() else "",
                 "sd_intervalFromBaseline_weeks": round(float(intervals[valid].std()), 2) if valid.sum() > 1 else "",
                 "min_intervalFromBaseline_weeks": round(float(intervals[valid].min()), 2) if valid.any() else "",
                 "max_intervalFromBaseline_weeks": round(float(intervals[valid].max()), 2) if valid.any() else "",
             }
         )
-    return pd.DataFrame(rows)
+    columns = [
+        "arm",
+        "session",
+        "completed_NofSubjects",
+        "valid_interval_NofSubjects",
+        "invalid_interval_NofSubjects",
+        "invalid_or_missing_interval_subjects",
+        "mean_intervalFromBaseline_weeks",
+        "sd_intervalFromBaseline_weeks",
+        "min_intervalFromBaseline_weeks",
+        "max_intervalFromBaseline_weeks",
+    ]
+    return pd.DataFrame(rows, columns=columns)
 
 
 def table_readiness(arm: str, subject_wise: pd.DataFrame) -> pd.DataFrame:
     total = len(subject_wise)
     count_true = lambda col: int((subject_wise[col].map(clean) == "True").sum()) if col in subject_wise else 0
+    missing_true = lambda col: subject_list(subject_wise.loc[subject_wise[col].map(clean) != "True", "subject_id"]) if col in subject_wise else ""
     qc_pass = count_true("subject_QC_pass")
     return pd.DataFrame(
         [
@@ -1120,16 +1167,22 @@ def table_readiness(arm: str, subject_wise: pd.DataFrame) -> pd.DataFrame:
                 "withdrawn_or_dropout_NofSubjects": 0,
                 "withdrawn_or_dropout_rate": 0,
                 "complete_all_experiment_sessions_NofSubjects": count_true("complete_all_experiment_sessions"),
+                "complete_all_experiment_sessions_missing_subjects": missing_true("complete_all_experiment_sessions"),
                 "complete_all_experiment_sessions_rate": rate(count_true("complete_all_experiment_sessions"), total),
                 "complete_all_instrument_NofSubjects": count_true("complete_all_instrument"),
+                "complete_all_instrument_missing_subjects": missing_true("complete_all_instrument"),
                 "complete_all_instrument_rate": rate(count_true("complete_all_instrument"), total),
                 "complete_all_ANT_NofSubjects": count_true("complete_all_ANT"),
+                "complete_all_ANT_missing_subjects": missing_true("complete_all_ANT"),
                 "complete_all_ANT_rate": rate(count_true("complete_all_ANT"), total),
                 "all_MRI_QC_passed_NofSubjects": count_true("all_MRI_QC_passed"),
+                "all_MRI_QC_passed_missing_subjects": missing_true("all_MRI_QC_passed"),
                 "all_MRI_QC_passed_rate": rate(count_true("all_MRI_QC_passed"), total),
                 "all_selfOther_QC_passed_NofSubjects": count_true("all_selfOther_QC_passed"),
+                "all_selfOther_QC_passed_missing_subjects": missing_true("all_selfOther_QC_passed"),
                 "all_selfOther_QC_passed_rate": rate(count_true("all_selfOther_QC_passed"), total),
                 "QC_pass_NofSubjects_rate": qc_pass,
+                "QC_pass_missing_subjects": missing_true("subject_QC_pass"),
                 "QC_passrate": rate(qc_pass, total),
             }
         ]

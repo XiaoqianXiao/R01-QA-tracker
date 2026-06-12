@@ -4,11 +4,11 @@
     "type": "split",
     "children": [
       {
-        "id": "97f152d1f9023777",
+        "id": "c85eee11e20f4b15",
         "type": "tabs",
         "children": [
           {
-            "id": "11f25567ca179519",
+            "id": "22cf3e66c753e744",
             "type": "leaf",
             "state": {
               "type": "empty",
@@ -176,8 +176,9 @@
       "bases:Create new base": false
     }
   },
-  "active": "11f25567ca179519",
+  "active": "22cf3e66c753e744",
   "lastOpenFiles": [
+    "SESSION_NOTE/2026-06-12_v2.md",
     "SESSION_NOTE/2026-06-12_v1.md",
     "PROJECT_CONTEXT.md",
     "results/~$QA_summary_arm1.xlsx",
