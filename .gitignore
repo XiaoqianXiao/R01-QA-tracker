@@ -1,4 +1,5 @@
 /data
 /results
 .obsidian/
-PROJECT_CONTEXT_*.md
+PROJECT_CONTEXT*
+/SESSION_NOTE
