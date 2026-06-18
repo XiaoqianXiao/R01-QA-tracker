@@ -178,6 +178,18 @@
   },
   "active": "dae99756c6b91b09",
   "lastOpenFiles": [
+    "SESSION_NOTE/2026-06-12_v4.md",
+    "SESSION_NOTE/2026-06-12_v3.md",
+    "SESSION_NOTE/2026-06-12_v2.md",
+    "SESSION_NOTE/2026-06-12_v1.md",
+    "SESSION_NOTE/2026-06-10_v1.md",
+    "SESSION_NOTE/2026-06-09_v6.md",
+    "SESSION_NOTE/2026-06-09_v5.md",
+    "SESSION_NOTE/2026-06-09_v4.md",
+    "SESSION_NOTE/2026-06-09_v3.md",
+    "SESSION_NOTE/2026-06-09_v2.md",
+    "SESSION_NOTE/2026-06-09_v1.md",
+    "SESSION_NOTE",
     "PROJECT_CONTEXT_ori.md",
     "SESSION_NOTE_new/2026-06-12_v4.md",
     "SESSION_NOTE_new/2026-06-12_v3.md",
@@ -197,18 +209,10 @@
     "Untitled",
     "code/__pycache__/qa_summary.cpython-311.pyc",
     "code/__pycache__",
-    "SESSION_NOTE/2026-06-12_v4.md",
     "results/~$QA_summary_arm1.xlsx",
-    "SESSION_NOTE/2026-06-12_v3.md",
     "results/QA_summary_arm1.xlsx",
     "results/QA_summary_arm1_v0.xlsx",
-    "SESSION_NOTE/2026-06-12_v2.md",
-    "SESSION_NOTE/2026-06-12_v1.md",
     "code/qa_summary.py",
-    "data/~$Instruments_in_each_Session_each_Arm.xlsx",
-    "PROJECT_CONTEXT_full.md",
-    "SESSION_NOTE/2026-06-10_v1.md",
-    "SESSION_NOTE/2026-06-09_v1.md",
-    "PROJECT_CONTEXT_v0.md"
+    "data/~$Instruments_in_each_Session_each_Arm.xlsx"
   ]
 }
