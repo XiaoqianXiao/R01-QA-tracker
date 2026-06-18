@@ -46,8 +46,8 @@ SESSION_ORDER = [
 ]
 
 INPUT_FILES = {
-    "participants": "ParticipantsQAtracker.csv",
-    "clinician": "ClinicianQAtracker.csv",
+    "participants": "IFOCUSStudyParticipa-QAtracker_DATA_*.csv",
+    "clinician": "IFOCUSStudyClinician-QAtracker_DATA_*.csv",
 }
 DESIGN_FILES = {
     "required_sessions": "Required_Sessions_for_each_Arm.xlsx",
@@ -80,6 +80,9 @@ CODEBOOK_FILES = ("Participants_REDCap.pdf", "Clini_REDCap.pdf")
 #           ],
 #           ...
 #       }
+#   Include or exclude subjects:
+#       "subjects": {"include_only": ["101", "102"], "exclude": ["105"]}
+#       "subjects": {"include_only": {"arm1": ["101"], "arm3": ["301"]}}
 # ---------------------------------------------------------------------------
 QA_CONFIG: dict[str, Any] = {
     # Which output arms to build. Leave as all three arms unless intentionally
@@ -88,7 +91,7 @@ QA_CONFIG: dict[str, Any] = {
     "required_sessions": {
         # If an arm is listed here, only these sessions are retained for that arm.
         # Session names use final labels, e.g. "Baseline", "T1", "IE T3".
-        "include_only": ["Baseline"],
+        "include_only": [],
         # Remove sessions after reading the design workbook.
         "exclude": {},
         # Add custom sessions. Each item may include arm, session, order,
@@ -98,13 +101,22 @@ QA_CONFIG: dict[str, Any] = {
     "expected_instruments": {
         # If an arm is listed here, only these configured instruments are retained
         # for that arm. Shape: {"arm1": {"Baseline": ["PHQ-9", "GAD-7"]}}.
-        "include_only": {"arm1": {"Baseline": ["PHQ-9", "GAD-7"]}},
+        "include_only": {},
         # Remove expected instruments after Included_in_summary == 1 filtering.
         # Items may specify arm, session, instrument, and/or instrument_source.
         "exclude": [],
         # Add expected instruments. Each item requires arm, session, instrument,
         # and instrument_source.
         "add": [],
+    },
+    "subjects": {
+        # Optional subject filters are applied after subject IDs are standardized.
+        # Accepted shapes:
+        #   [] or {}                  -> no filtering
+        #   ["101", "102"]           -> apply to all active arms
+        #   {"arm1": ["101", "102"]} -> apply to specific arms
+        "include_only": [],
+        "exclude": [],
     },
 }
 
@@ -291,6 +303,20 @@ def normalize_arm_session_config(value: Any, active_arms: Iterable[str]) -> dict
     return {arm: sessions for arm in active_arms}
 
 
+def normalize_subject_filter(value: Any, active_arms: Iterable[str]) -> dict[str, set[str]]:
+    if not value:
+        return {}
+    if isinstance(value, dict):
+        return {
+            clean(arm): {standardize_subject_id(subject) for subject in subjects if standardize_subject_id(subject)}
+            for arm, subjects in value.items()
+        }
+    if isinstance(value, str):
+        value = [value]
+    subjects = {standardize_subject_id(subject) for subject in value if standardize_subject_id(subject)}
+    return {arm: subjects for arm in active_arms}
+
+
 def normalize_expected_include_config(value: Any, active_arms: Iterable[str]) -> dict[str, dict[str, set[str]]]:
     if not value:
         return {}
@@ -318,6 +344,27 @@ def normalize_expected_include_config(value: Any, active_arms: Iterable[str]) ->
             for session, instruments in by_session.items()
         }
     return normalized
+
+
+def apply_subject_config(subjects: pd.DataFrame, config: dict[str, Any], log: ValidationLog) -> pd.DataFrame:
+    subject_config = config.get("subjects", {})
+    out = subjects.copy()
+    active = set(configured_arms(config))
+    out = out[out["arm"].isin(active)].copy()
+    include_only = normalize_subject_filter(subject_config.get("include_only", []), active)
+    if include_only:
+        before = len(out)
+        keep_mask = pd.Series(False, index=out.index)
+        for arm, keep_subjects in include_only.items():
+            keep_mask |= (out["arm"] == arm) & (out["subject_id"].isin(keep_subjects))
+        out = out[keep_mask].copy()
+        log.info(f"Config subjects.include_only: retained {len(out)} of {before} subjects")
+    exclude = normalize_subject_filter(subject_config.get("exclude", []), active)
+    for arm, drop_subjects in exclude.items():
+        before = len(out)
+        out = out[~((out["arm"] == arm) & (out["subject_id"].isin(drop_subjects)))].copy()
+        log.info(f"Config subjects.exclude {arm}: removed {before - len(out)} subjects")
+    return out.sort_values(["arm", "subject_id"]).reset_index(drop=True)
 
 
 def apply_required_session_config(
@@ -428,24 +475,47 @@ def standardize_subject_id(raw: Any) -> str:
 
 
 def infer_arm(subject_id: str) -> str:
-    return {"1": "arm1", "2": "arm2", "3": "arm3"}.get(clean(subject_id)[:1], "unknown")
+    return {"1": "arm1", "2": "arm3", "3": "arm2"}.get(clean(subject_id)[:1], "unknown")
 
 
-def status_from_complete_code(value: Any) -> str:
+def status_from_complete_code(value: Any, field_name: str = "") -> str:
+    # Protect against Pandas Series
+    if type(value).__name__ in ('Series', 'DataFrame'):
+        value = value.iloc[0] if not value.empty else ""
+        
     text = clean(value).lower()
+
+    # --- ANT EXCEPTION LOGIC ---
+    # Dynamically check if the field is one of our ANT fields
+    if field_name in ANT_FIELDS_BY_SESSION.values():
+        if text in {"1", "1.0", "yes", "y", "true", "checked"}:
+            return "complete"
+        if text in {"0", "0.0", "na", "n/a", "not applicable", "none"}:
+            return "complete"  # Treat NA as complete so QA passes
+        if text in {"2", "2.0", "no", "n", "false", "unchecked"}:
+            return "incomplete"
+            
+        if text:
+            print(f"⚠️ [QA Alert] Unrecognized ANT value for '{field_name}': '{text}'")
+            return "review_required"
+        return "missing"
+
+    # --- STANDARD REDCAP LOGIC ---
     if text == "2":
         return "complete"
     if text == "1":
         return "unverified"
     if text == "0":
         return "incomplete"
-    if text in TRUE_VALUES:
+    if text in {"true", "1", "yes", "y", "checked"}:
         return "complete"
-    if text in FALSE_VALUES:
+    if text in {"false", "0", "no", "n", "unchecked"}:
         return "incomplete"
+        
     if text:
         return "review_required"
     return "missing"
+
 
 
 def combined_status(statuses: Iterable[str]) -> str:
@@ -459,14 +529,6 @@ def combined_status(statuses: Iterable[str]) -> str:
     if any(s == "incomplete" for s in values):
         return "incomplete"
     return "missing"
-
-
-def status_from_fields(row: pd.Series | None, fields: str | list[str] | None) -> str:
-    if row is None or not fields:
-        return "missing"
-    field_list = [fields] if isinstance(fields, str) else fields
-    statuses = [status_from_complete_code(row.get(field, "")) for field in field_list if field in row.index]
-    return combined_status(statuses)
 
 
 def qc_status_from_poor_quality(value: Any) -> str:
@@ -622,19 +684,30 @@ def event_to_session(source: str, event_name: Any, event_map: dict[tuple[str, st
     return f"UNMAPPED_EVENT_{event}"
 
 
+def get_latest_file(input_dir: Path, pattern: str) -> Path:
+    files = list(input_dir.glob(pattern))
+    if not files:
+        raise FileNotFoundError(f"No file found matching pattern: {pattern}")
+    # Return the file with the most recent modification time
+    return max(files, key=lambda f: f.stat().st_mtime)
+
+
 def load_redcap(input_dir: Path, required_sessions: pd.DataFrame, log: ValidationLog) -> pd.DataFrame:
     frames = []
     event_map = build_event_map(required_sessions)
-    for source, filename in INPUT_FILES.items():
-        df = read_csv_strings(input_dir / filename, log)
+    for source, pattern in INPUT_FILES.items():
+        file_path = get_latest_file(input_dir, pattern)
+        log.info(f"Using {source} file: {file_path.name}")
+
+        df = read_csv_strings(file_path, log)
         df.columns = [normalize_column(col) for col in df.columns]
         id_col = "record_id" if source == "participants" else "preescreen_id"
         if id_col not in df.columns:
-            raise ValueError(f"{filename} is missing required subject ID column {id_col}")
+            raise ValueError(f"{file_path} is missing required subject ID column {id_col}")
         if "redcap_event_name" not in df.columns:
-            raise ValueError(f"{filename} is missing redcap_event_name")
+            raise ValueError(f"{file_path} is missing redcap_event_name")
         df["source"] = source
-        df["source_file"] = filename
+        df["source_file"] = file_path
         df["subject_id"] = df[id_col].map(standardize_subject_id)
         df["arm"] = df["subject_id"].map(infer_arm)
         df["session"] = df["redcap_event_name"].map(lambda event: event_to_session(source, event, event_map, log))
@@ -770,12 +843,42 @@ def build_behavioral_long(redcap: pd.DataFrame, subjects: pd.DataFrame, required
                 populated = []
             run_fields = (populated or scan_fields)[:2]
             for idx in (1, 2):
-                field = run_fields[idx - 1] if idx <= len(run_fields) else ""
-                value = clean(record.get(field, "")) if record is not None and field else ""
-                status = "missing" if not value or value.lower() in {"na", "n/a", "nd"} else "complete"
-                if value and status != "complete":
-                    status = "review_required"
-                qc_status = "pass" if status == "complete" else ("missing" if status == "missing" else "review_required")
+                if record is not None:
+                    # Define your exact REDCap column names here
+                    acc_field = f"selfother_run{idx}_accuracy"
+                    miss_field = f"selfother_run{idx}_missing_rate"
+                    
+                    acc_val = clean(record.get(acc_field, ""))
+                    miss_val = clean(record.get(miss_field, ""))
+                    
+                    # If fields are entirely empty, mark missing
+                    if not acc_val and not miss_val:
+                        status = "missing"
+                        qc_status = "missing"
+                    else:
+                        try:
+                            # Parse values to floats for comparison
+                            acc_float = float(acc_val)
+                            miss_float = float(miss_val)
+                            
+                            status = "complete" # Data exists
+                            
+                            # Threshold Logic: > 90% Acc, < 10% Missing
+                            if acc_float > 90.0 and miss_float < 10.0:
+                                qc_status = "pass"
+                            else:
+                                qc_status = "fail"
+                                
+                        except ValueError:
+                            # Catch cases where text like "NA" or "ND" was entered instead of numbers
+                            status = "missing" if acc_val.lower() in {"na", "n/a", "nd"} else "review_required"
+                            qc_status = "missing" if status == "missing" else "review_required"
+                else:
+                    acc_val, miss_val = "", ""
+                    status = "missing"
+                    qc_status = "missing"
+
+                # Append to the long-format dataframe list
                 rows.append(
                     {
                         "subject_id": subject_id,
@@ -786,22 +889,10 @@ def build_behavioral_long(redcap: pd.DataFrame, subjects: pd.DataFrame, required
                         "status": status,
                         "qc_status": qc_status,
                         "qc_pass": qc_status == "pass",
-                        "value": value,
+                        # Store both metrics in the value column so they appear in outputs for debugging
+                        "value": f"Acc: {acc_val} | Miss: {miss_val}" if (acc_val or miss_val) else "", 
                     }
                 )
-            rows.append(
-                {
-                    "subject_id": subject_id,
-                    "arm": arm,
-                    "session": session,
-                    "domain": "selfOthers",
-                    "item": "Npractice",
-                    "status": "",
-                    "qc_status": "",
-                    "qc_pass": "",
-                    "value": "",
-                }
-            )
     return pd.DataFrame(rows)
 
 
@@ -911,6 +1002,21 @@ def subjects_from_series(series: pd.Series, statuses: set[str]) -> str:
     if series.empty:
         return ""
     return subject_list(series[series.isin(statuses)].index)
+    
+
+def status_from_fields(row: pd.Series | None, fields: str | list[str] | None) -> str:
+    if row is None or not fields:
+        return "missing"
+        
+    field_list = [fields] if isinstance(fields, str) else fields
+    
+    statuses = []
+    for field in field_list:
+        if field in row.index:
+            # CRITICAL FIX: We MUST pass 'field' as the second argument so the exception triggers
+            statuses.append(status_from_complete_code(row.get(field, ""), field))
+            
+    return combined_status(statuses)
 
 
 def rate(num: int, denom: int) -> float:
@@ -964,7 +1070,7 @@ def session_summary_values(
         "QC_pass": session_completed and (not self_expected or self_pass) and (not mri_expected or mri_pass),
     }
 
-
+from datetime import datetime, timedelta
 def build_subject_wise(
     arm: str,
     subjects: pd.DataFrame,
@@ -980,8 +1086,45 @@ def build_subject_wise(
     ].sort_values("order")
     observed_dates = build_session_dates(redcap)
     rows: list[dict[str, Any]] = []
+    clinician_data = redcap[redcap["source"] == "clinician"]
+    status_map = {"1": "Active", "2": "Withdrawn", "3": "Completed", "4": "Other", "5":"Screened_not_Eligiable"}
     for subject_id in arm_subjects:
-        row: dict[str, Any] = {"subject_id": subject_id, "arm": arm, "dropout_status": "active"}
+        subject_record = clinician_data[clinician_data["subject_id"] == subject_id]
+        date_cols = [c for c in qn.columns if 'date' in c]
+        qn_dates = qn.copy()
+        for col in date_cols:
+            qn_dates[col] = pd.to_datetime(qn_dates[col], errors='coerce')
+        last_activity = qn_dates.groupby('subject_id')[date_cols].max().max(axis=1)
+        current_time = datetime.now()
+        three_months = timedelta(days=90)
+        raw_status = ""
+        if "participant_status" in subject_record.columns:
+            raw_status = str(subject_record["participant_status"].iloc[0])
+        if raw_status in status_map:
+            dropout_status = status_map[raw_status]
+        screening_record = subject_record[subject_record['redcap_event_name'].str.contains('screening', case=False, na=False)]
+        if screening_record.empty:
+            screening_complete_val = False
+            elig_val = None
+        else:
+            # Safely get the status and group from the first screening record
+            screening_complete_val = str(screening_record['eligibility_form_complete'].iloc[0]).strip() == '2'
+            elig_val = screening_record['elig_group'].iloc[0]
+        current_event = subject_record['redcap_event_name'] if not subject_record.empty else ""
+        if not screening_complete_val:
+            dropout_status = 'Screen_not_complete'
+        elif str(elig_val) not in ["1", "2", "3"]:
+            dropout_status = 'Screened_not_Eligible'
+        elif (len(current_event) == 19 and arm == 'arm1') or (len(current_event) == 4 and arm == 'arm2'):
+            dropout_status = 'Completed'
+        else:
+            # Fallback logic: check for last activity
+            last_date = last_activity.get(subject_id)
+            if pd.notna(last_date) and (current_time - last_date) <= three_months:
+                dropout_status = "Active"
+            else:
+                dropout_status = "need to review"
+        row: dict[str, Any] = {"subject_id": subject_id, "arm": arm, "dropout_status": dropout_status}
         for session in arm_sessions["session"]:
             s_label = excel_safe_label(session)
             qn_s = qn[(qn["subject_id"] == subject_id) & (qn["session"] == session)].sort_values("instrument")
@@ -1408,6 +1551,28 @@ def table_asap_summary(arm: str, subject_wise: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+# def build_group_tables(
+#     arm: str,
+#     qn: pd.DataFrame,
+#     beh: pd.DataFrame,
+#     mri: pd.DataFrame,
+#     subject_wise: pd.DataFrame,
+#     arm_sessions: list[str],
+# ) -> list[tuple[str, pd.DataFrame]]:
+#     self_qc = beh[(beh["domain"] == "selfOthers") & (beh["item"].str.startswith("run"))].copy()
+#     return [
+#         ("Table 1. Session-wise Summary", table_session_instrument_summary(arm, qn)),
+#         ("Table 2. Instrument-wise Summary", table_instrument_summary(arm, qn)),
+#         ("Table 3-1. ANT task complete rate by session", table_ant_by_session(arm, beh)),
+#         ("Table 3-2. ANT task complete rate by subject", table_ant_by_subject(arm, beh)),
+#         ("Table 4-1. SelfOthers QC pass rate by session", qc_table_by_session(arm, self_qc, "selfOthers")),
+#         ("Table 4-2. SelfOthers QC pass rate by subject", qc_table_by_subject(arm, self_qc)),
+#         ("Table 5. MRI QC pass rate by session", qc_table_by_session(arm, mri, "MRI")),
+#         ("Table 5-2. MRI QC pass rate by subject", qc_table_by_subject(arm, mri, "scan_or_run")),
+#         ("Table 6. Session interval summary after Baseline", table_interval_summary(arm, subject_wise, arm_sessions)),
+#         ("Table 7. ASAP summary", table_asap_summary(arm, subject_wise)),
+#         ("Table 8. Participant-level QA readiness summary", table_readiness(arm, subject_wise)),
+#     ]
 def build_group_tables(
     arm: str,
     qn: pd.DataFrame,
@@ -1416,19 +1581,38 @@ def build_group_tables(
     subject_wise: pd.DataFrame,
     arm_sessions: list[str],
 ) -> list[tuple[str, pd.DataFrame]]:
-    self_qc = beh[(beh["domain"] == "selfOthers") & (beh["item"].str.startswith("run"))].copy()
+    
+    # 1. Extract valid subjects based on dropout_status
+    valid_statuses = {"Active", "Completed"}
+    valid_subjects = set(
+        subject_wise[subject_wise["dropout_status"].isin(valid_statuses)]["subject_id"]
+    )
+
+    # 2. Filter all long-format DataFrames to include only valid subjects
+    qn_filtered = qn[qn["subject_id"].isin(valid_subjects)].copy()
+    beh_filtered = beh[beh["subject_id"].isin(valid_subjects)].copy()
+    mri_filtered = mri[mri["subject_id"].isin(valid_subjects)].copy()
+    subject_wise_filtered = subject_wise[subject_wise["subject_id"].isin(valid_subjects)].copy()
+
+    # 3. Create selfOthers subset from the filtered behavioral data
+    self_qc = beh_filtered[
+        (beh_filtered["domain"] == "selfOthers") & 
+        (beh_filtered["item"].str.startswith("run"))
+    ].copy()
+
+    # 4. Generate tables using the filtered DataFrames
     return [
-        ("Table 1. Session-wise Summary", table_session_instrument_summary(arm, qn)),
-        ("Table 2. Instrument-wise Summary", table_instrument_summary(arm, qn)),
-        ("Table 3-1. ANT task complete rate by session", table_ant_by_session(arm, beh)),
-        ("Table 3-2. ANT task complete rate by subject", table_ant_by_subject(arm, beh)),
+        ("Table 1. Session-wise Summary", table_session_instrument_summary(arm, qn_filtered)),
+        ("Table 2. Instrument-wise Summary", table_instrument_summary(arm, qn_filtered)),
+        ("Table 3-1. ANT task complete rate by session", table_ant_by_session(arm, beh_filtered)),
+        ("Table 3-2. ANT task complete rate by subject", table_ant_by_subject(arm, beh_filtered)),
         ("Table 4-1. SelfOthers QC pass rate by session", qc_table_by_session(arm, self_qc, "selfOthers")),
         ("Table 4-2. SelfOthers QC pass rate by subject", qc_table_by_subject(arm, self_qc)),
-        ("Table 5. MRI QC pass rate by session", qc_table_by_session(arm, mri, "MRI")),
-        ("Table 5-2. MRI QC pass rate by subject", qc_table_by_subject(arm, mri, "scan_or_run")),
-        ("Table 6. Session interval summary after Baseline", table_interval_summary(arm, subject_wise, arm_sessions)),
-        ("Table 7. ASAP summary", table_asap_summary(arm, subject_wise)),
-        ("Table 8. Participant-level QA readiness summary", table_readiness(arm, subject_wise)),
+        ("Table 5. MRI QC pass rate by session", qc_table_by_session(arm, mri_filtered, "MRI")),
+        ("Table 5-2. MRI QC pass rate by subject", qc_table_by_subject(arm, mri_filtered, "scan_or_run")),
+        ("Table 6. Session interval summary after Baseline", table_interval_summary(arm, subject_wise_filtered, arm_sessions)),
+        ("Table 7. ASAP summary", table_asap_summary(arm, subject_wise_filtered)),
+        ("Table 8. Participant-level QA readiness summary", table_readiness(arm, subject_wise_filtered)),
     ]
 
 
@@ -1482,6 +1666,8 @@ def build_outputs(input_dir: Path, output_dir: Path) -> None:
     redcap = load_redcap(input_dir, required_sessions, log)
     mri_subjects = read_mri_subjects(input_dir, log)
     subjects = build_subject_arm_map(redcap, mri_subjects, log)
+    subjects = apply_subject_config(subjects, QA_CONFIG, log)
+    log.count("subjects_after_config", len(subjects))
     qn = build_questionnaire_long(redcap, subjects, expected, log)
     beh = build_behavioral_long(redcap, subjects, required_sessions)
     mri = load_mri_long(input_dir, subjects, required_sessions, log)
