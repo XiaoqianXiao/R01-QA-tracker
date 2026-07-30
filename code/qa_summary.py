@@ -246,6 +246,11 @@ def clean(value: Any) -> str:
     return str(value).strip()
 
 
+def design_flag_enabled(value: Any) -> bool:
+    """Interpret design-workbook flags such as 1, 1.0, True, or Yes."""
+    return clean(value).lower() in TRUE_VALUES | {"1.0"}
+
+
 def normalize_column(name: str) -> str:
     value = clean(name).lower()
     value = re.sub(r"[^0-9a-z]+", "_", value)
@@ -469,11 +474,29 @@ def apply_expected_instrument_config(
         if arm not in active or session not in required_by_arm.get(arm, set()) or not instrument or not source:
             log.warn(f"Skipping invalid configured expected instrument: {item}")
             continue
-        additions.append({"arm": arm, "session": session, "instrument": instrument, "instrument_source": source})
+        additions.append(
+            {
+                "arm": arm,
+                "session": session,
+                "instrument": instrument,
+                "instrument_source": source,
+                "total_score_required": design_flag_enabled(item.get("total_score", "")),
+            }
+        )
     if additions:
         out = pd.concat([out, pd.DataFrame(additions)], ignore_index=True)
         log.info(f"Config expected_instruments.add: added {len(additions)} rows")
-    return out.drop_duplicates(["arm", "session", "instrument", "instrument_source"]).reset_index(drop=True)
+    if "total_score_required" not in out.columns:
+        out["total_score_required"] = False
+    out["total_score_required"] = out["total_score_required"].map(
+        lambda value: design_flag_enabled(value)
+    )
+    key_cols = ["arm", "session", "instrument", "instrument_source"]
+    return (
+        out.sort_values("total_score_required", ascending=False)
+        .drop_duplicates(key_cols, keep="first")
+        .reset_index(drop=True)
+    )
 
 
 def final_session_allowed(session: str) -> bool:
@@ -622,7 +645,7 @@ def load_expected_instruments(input_dir: Path, required_sessions: pd.DataFrame, 
     if not path.exists():
         raise FileNotFoundError(f"Required design file not found: {path}")
     required_by_arm = {arm: set(group["session"]) for arm, group in required_sessions.groupby("arm", sort=False)}
-    rows: list[dict[str, str]] = []
+    rows: list[dict[str, Any]] = []
     workbook = pd.ExcelFile(path)
     for sheet in workbook.sheet_names:
         arm_match = re.search(r"(\d+)", sheet)
@@ -635,11 +658,17 @@ def load_expected_instruments(input_dir: Path, required_sessions: pd.DataFrame, 
         for required_col in ("session", "source_of_instrument", "instrument", "included_in_summary"):
             if required_col not in df.columns:
                 raise ValueError(f"{path.name} sheet {sheet} is missing {required_col}")
+        if "total_score" not in df.columns:
+            log.warn(
+                f"{path.name} sheet {sheet} has no Total_score column; "
+                "all instruments on this sheet will be treated as Total_score = 0"
+            )
         excluded = 0
         for _, row in df.iterrows():
             if clean(row["included_in_summary"]) != "1":
                 excluded += 1
                 continue
+            total_score_required = design_flag_enabled(row.get("total_score", ""))
             for session in expand_design_session_label(row["session"]):
                 if not final_session_allowed(session):
                     continue
@@ -652,10 +681,24 @@ def load_expected_instruments(input_dir: Path, required_sessions: pd.DataFrame, 
                         "session": session,
                         "instrument": clean(row["instrument"]),
                         "instrument_source": clean(row["source_of_instrument"]),
+                        "total_score_required": total_score_required,
                     }
                 )
         log.info(f"{path.name} {sheet}: excluded {excluded} rows where Included_in_summary != 1")
-    out = pd.DataFrame(rows).drop_duplicates().reset_index(drop=True)
+    out = pd.DataFrame(rows)
+    if out.empty:
+        out = pd.DataFrame(
+            columns=["arm", "session", "instrument", "instrument_source", "total_score_required"]
+        )
+    else:
+        # If duplicated design rows disagree, Total_score = 1 takes priority.
+        key_cols = ["arm", "session", "instrument", "instrument_source"]
+        out["total_score_required"] = out["total_score_required"].fillna(False).astype(bool)
+        out = (
+            out.sort_values("total_score_required", ascending=False)
+            .drop_duplicates(key_cols, keep="first")
+            .reset_index(drop=True)
+        )
     log.count("included_expected_instrument_rows", len(out))
     return out
 
@@ -747,6 +790,88 @@ def instrument_config(source_label: str, instrument: str) -> dict[str, str | lis
     return CLINICIAN_INSTRUMENTS.get(instrument, {})
 
 
+def numeric_score_present(value: Any) -> bool:
+    """Return True for a finite numeric total, including zero."""
+    text = clean(value).replace(",", "")
+    if not text:
+        return False
+    try:
+        return math.isfinite(float(text))
+    except (TypeError, ValueError):
+        return False
+
+
+def resolve_total_score_field(
+    columns: Iterable[Any],
+    cfg: dict[str, str | list[str]],
+    instrument: str,
+) -> str:
+    """Resolve the instrument-specific REDCap *_total column.
+
+    An explicit cfg["total"] mapping is preferred when present. Otherwise, the
+    function matches the *_total field to the instrument's completion-field stem
+    (for example phq9_complete -> phq9_total), allowing underscore differences.
+    """
+    available = [normalize_column(col) for col in columns]
+    total_fields = [field for field in available if field.endswith("_total")]
+    if not total_fields:
+        return ""
+
+    explicit = cfg.get("total")
+    explicit_fields = [explicit] if isinstance(explicit, str) else (explicit or [])
+    for field in explicit_fields:
+        normalized = normalize_column(field)
+        if normalized in total_fields:
+            return normalized
+
+    complete = cfg.get("complete")
+    complete_fields = [complete] if isinstance(complete, str) else (complete or [])
+    stems: list[str] = []
+    for field in complete_fields:
+        stem = re.sub(r"_complete$", "", normalize_column(field))
+        if stem:
+            stems.append(stem)
+
+    instrument_stem = normalize_column(instrument)
+    if instrument_stem:
+        stems.append(instrument_stem)
+
+    # First try direct names such as gad7_total or lsas_sr_total.
+    direct_candidates: list[str] = []
+    for stem in stems:
+        direct_candidates.append(f"{stem}_total")
+        direct_candidates.append(f"{stem.replace('_', '')}_total")
+    for candidate in direct_candidates:
+        if candidate in total_fields:
+            return candidate
+
+    # Then allow formatting differences such as phq9 versus phq_9.
+    compact_stems = {
+        re.sub(r"[^0-9a-z]+", "", stem.lower())
+        for stem in stems
+        if stem
+    }
+    exact_matches = [
+        field
+        for field in total_fields
+        if re.sub(r"[^0-9a-z]+", "", field[:-6].lower()) in compact_stems
+    ]
+    if len(exact_matches) == 1:
+        return exact_matches[0]
+
+    # A unique prefix match supports names such as qids_sr_total for QIDS.
+    prefix_matches = []
+    for field in total_fields:
+        field_stem = re.sub(r"[^0-9a-z]+", "", field[:-6].lower())
+        if any(
+            field_stem.startswith(stem) or stem.startswith(field_stem)
+            for stem in compact_stems
+            if len(stem) >= 4
+        ):
+            prefix_matches.append(field)
+    return prefix_matches[0] if len(prefix_matches) == 1 else ""
+
+
 def build_questionnaire_long(
     redcap: pd.DataFrame,
     subjects: pd.DataFrame,
@@ -765,13 +890,43 @@ def build_questionnaire_long(
             & (redcap["source"] == source)
         ]
         by_subject = {sid: group.iloc[0] for sid, group in matches.groupby("subject_id", sort=False)}
+        total_score_required = design_flag_enabled(exp.get("total_score_required", ""))
+        enforce_total_score = exp["session"] == "Baseline" and total_score_required
+        total_score_field = (
+            resolve_total_score_field(matches.columns, cfg, exp["instrument"])
+            if enforce_total_score
+            else ""
+        )
+        if enforce_total_score and not total_score_field:
+            log.warn(
+                "Could not resolve a unique *_total REDCap field for "
+                f"{exp['arm']} Baseline {exp['instrument']}; its status cannot be complete"
+            )
+
         for subject_id in subjects.loc[subjects["arm"] == exp["arm"], "subject_id"]:
             observed = by_subject.get(subject_id)
             date_field = clean(cfg.get("date", ""))
             date = clean(observed.get(date_field, "")) if observed is not None and date_field else ""
             status = status_from_fields(observed, cfg.get("complete"))
-            if status == "missing" and date:
+
+            total_score_value = (
+                clean(observed.get(total_score_field, ""))
+                if observed is not None and total_score_field
+                else ""
+            )
+            total_score_numeric = numeric_score_present(total_score_value)
+
+            if enforce_total_score:
+                # A Baseline instrument marked Total_score = 1 is complete only
+                # when its REDCap completion field is complete AND its own
+                # instrument-specific *_total field contains a number.
+                if status == "complete" and not total_score_numeric:
+                    status = "incomplete"
+            elif status == "missing" and date:
+                # Preserve the existing date fallback for instruments that do
+                # not require a numeric Baseline total score.
                 status = "complete"
+
             rows.append(
                 {
                     "subject_id": subject_id,
@@ -782,6 +937,10 @@ def build_questionnaire_long(
                     "date": date,
                     "status": status,
                     "expected": True,
+                    "total_score_required": enforce_total_score,
+                    "total_score_field": total_score_field,
+                    "total_score_value": total_score_value,
+                    "total_score_numeric": total_score_numeric,
                 }
             )
     out = pd.DataFrame(rows)
