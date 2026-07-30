@@ -54,10 +54,20 @@ DESIGN_FILES = {
     "expected_instruments": "Instruments_in_each_Session_each_Arm.xlsx",
 }
 MRI_FILES = {
-    "anat": "QC_anat.csv",
+    #"anat": "QC_anat.csv",
     "func": "QC_func.csv",
 }
 CODEBOOK_FILES = ("Participants_REDCap.pdf", "Clini_REDCap.pdf")
+STANDARD_INTERVAL_WEEKS = {
+    "Repeat Baseline": 4,
+    "T12": 16,
+}
+INTERVAL_SUMMARY_SESSIONS = tuple(STANDARD_INTERVAL_WEEKS)
+TE_SCAN_PAIRS = (
+    ("T6", ("IE T6",)),
+    ("T12", ("IE T12", "T12")),
+)
+STANDARD_TE_SCAN_INTERVAL_DAYS = 10
 
 # ---------------------------------------------------------------------------
 # Configure expected sessions and instruments here.
@@ -134,13 +144,15 @@ MRI_SESSION_MAP = {
     "ses-t3": "T3",
     "ses-t4": "T4",
     "ses-t5": "T5",
-    "ses-t6": "T6 Scan",
+    #"ses-t6": "T6 Scan",
+    "ses-t6": "IE T6",
     "ses-t7": "T7",
     "ses-t8": "T8",
     "ses-t9": "T9",
     "ses-t10": "T10",
     "ses-t11": "T11",
-    "ses-t12": "T12 Scan",
+    #"ses-t12": "T12 Scan",
+    "ses-t12": "IE T12",
 }
 
 PARTICIPANT_INSTRUMENTS: dict[str, dict[str, str | list[str]]] = {
@@ -801,12 +813,34 @@ def build_session_dates(redcap: pd.DataFrame) -> dict[tuple[str, str], str]:
     return observed
 
 
+def build_session_field_dates(redcap: pd.DataFrame, field: str, source: str | None = None) -> dict[tuple[str, str], str]:
+    data = redcap.copy()
+    if source is not None:
+        data = data[data["source"] == source].copy()
+    observed: dict[tuple[str, str], str] = {}
+    if field not in data.columns:
+        return observed
+    for _, row in data.iterrows():
+        date = clean(row.get(field, ""))
+        if date:
+            observed.setdefault((row["subject_id"], row["session"]), date)
+    return observed
+
+
 def interval_weeks(baseline_date: str, current_date: str) -> float | None:
     baseline = pd.to_datetime(clean(baseline_date), errors="coerce")
     current = pd.to_datetime(clean(current_date), errors="coerce")
     if pd.isna(baseline) or pd.isna(current):
         return None
     return round((current - baseline).days / 7, 2)
+
+
+def interval_days(start_date: str, current_date: str) -> int | None:
+    start = pd.to_datetime(clean(start_date), errors="coerce")
+    current = pd.to_datetime(clean(current_date), errors="coerce")
+    if pd.isna(start) or pd.isna(current):
+        return None
+    return int((current - start).days)
 
 
 def build_behavioral_long(redcap: pd.DataFrame, subjects: pd.DataFrame, required_sessions: pd.DataFrame) -> pd.DataFrame:
@@ -934,8 +968,8 @@ def load_mri_long(input_dir: Path, subjects: pd.DataFrame, required_sessions: pd
             session = MRI_SESSION_MAP.get(clean(row["sesID"]).lower(), f"UNMAPPED_MRI_SESSION_{clean(row['sesID'])}")
             if session.startswith("UNMAPPED"):
                 log.warn(f"Unmapped MRI sesID: {row['sesID']}")
-            if kind == "anat":
-                scan_or_run = "anat_T1w"
+            #if kind == "anat":
+            #    scan_or_run = "anat_T1w"
             else:
                 task = clean(row["taskID"]).lower() or "task"
                 run = clean(row["runID"]).zfill(2)
@@ -1087,109 +1121,437 @@ def build_subject_wise(
     observed_dates = build_session_dates(redcap)
     rows: list[dict[str, Any]] = []
     clinician_data = redcap[redcap["source"] == "clinician"]
-    status_map = {"1": "Active", "2": "Withdrawn", "3": "Completed", "4": "Other", "5":"Screened_not_Eligiable"}
+    # status_map = {"1": "Active", "2": "Withdrawn", "3": "Ineligible", "4": "Completed", "5":"Other"}
+    # for subject_id in arm_subjects:
+    #     subject_record = clinician_data[clinician_data["subject_id"] == subject_id]
+    #     date_cols = [c for c in qn.columns if 'date' in c]
+    #     qn_dates = qn.copy()
+    #     for col in date_cols:
+    #         qn_dates[col] = pd.to_datetime(qn_dates[col], errors='coerce')
+    #     last_activity = qn_dates.groupby('subject_id')[date_cols].max().max(axis=1)
+    #     current_time = datetime.now()
+    #     three_months = timedelta(days=90)
+    #     raw_status = ""
+    #     if "participant_status" in subject_record.columns:
+    #         raw_status = str(subject_record["participant_status"].iloc[0])
+    #     if raw_status in status_map:
+    #         dropout_status = status_map[raw_status]
+    #     subject_status_record = subject_record[subject_record['redcap_event_name'].str.contains('subject_status', case=False, na=False)]
+    #     if subject_status_record.empty:
+    #         subject_status_complete_val = False
+    #         elig_val = None
+    #     else:
+    #         # Safely get the status and group from the first screening record
+    #         subject_status_complete_val = str(subject_status_record['subject_status_complete'].iloc[0]).strip() == '2'
+    #         elig_val = subject_status_record['elig_group'].iloc[0]
+    #     current_event = subject_record['redcap_event_name'] if not subject_record.empty else ""
+    #     if not subject_status_complete_val:
+    #         dropout_status = 'subject_status_not_complete'
+    #     elif str(elig_val) not in ["1", "2", "4"]:
+    #         dropout_status = 'subject_status_not_Eligible'
+    #     #elif (len(current_event) == 19 and arm == 'arm1') or (len(current_event) == 4 and arm == 'arm2'):
+    #     #    dropout_status = 'Completed'
+    #     else:
+    #         # Fallback logic: check for last activity
+    #         last_date = last_activity.get(subject_id)
+    #         if pd.notna(last_date) and (current_time - last_date) <= three_months:
+    #             dropout_status = "Active"
+    #         else:
+    #             dropout_status = "need to review"
+    #     row: dict[str, Any] = {"subject_id": subject_id, "arm": arm, "dropout_status": dropout_status}
+    #     for session in arm_sessions["session"]:
+    #         s_label = excel_safe_label(session)
+    #         qn_s = qn[(qn["subject_id"] == subject_id) & (qn["session"] == session)].sort_values("instrument")
+    #         for _, item in qn_s.iterrows():
+    #             q_label = item_label(item["instrument"])
+    #             row[f"ses-{s_label}_qn-{q_label}_date"] = item["date"]
+    #             row[f"ses-{s_label}_qn-{q_label}_status"] = item["status"]
+    #         ant_s = beh[
+    #             (beh["subject_id"] == subject_id)
+    #             & (beh["session"] == session)
+    #             & (beh["domain"] == "ANT")
+    #         ]
+    #         if not ant_s.empty:
+    #             row[f"ses-{s_label}_beh-ANT_status"] = ant_s.iloc[0]["status"]
+    #         self_s = beh[
+    #             (beh["subject_id"] == subject_id)
+    #             & (beh["session"] == session)
+    #             & (beh["domain"] == "selfOthers")
+    #         ]
+    #         npractice = self_s[self_s["item"] == "Npractice"]
+    #         if not npractice.empty:
+    #             row[f"ses-{s_label}_beh-selfOthers_Npractice"] = npractice.iloc[0]["value"]
+    #         for run in ("run1", "run2"):
+    #             run_s = self_s[self_s["item"] == run]
+    #             if not run_s.empty:
+    #                 run_row = run_s.iloc[0]
+    #                 row[f"ses-{s_label}_beh-selfOthers_{run}_status"] = run_row["status"]
+    #                 row[f"ses-{s_label}_beh-selfOthers_{run}_acc"] = ""
+    #                 row[f"ses-{s_label}_beh-selfOthers_{run}_missingRate"] = ""
+    #         mri_s = mri[(mri["subject_id"] == subject_id) & (mri["session"] == session)].sort_values("scan_or_run")
+    #         for _, item in mri_s.iterrows():
+    #             row[f"ses-{s_label}_mri-{item_label(item['scan_or_run'])}_qc_status"] = item["qc_status"]
+    #         summary = session_summary_values(subject_id, session, qn, beh, mri)
+    #         for key, value in summary.items():
+    #             row[f"ses-{s_label}_{key}"] = bool_text(value) if isinstance(value, bool) else value
+    #         if session in INTERVAL_SUMMARY_SESSIONS:
+    #             reference_session = "Baseline" if session == "Repeat Baseline" else "Repeat Baseline"
+    #             weeks = interval_weeks(
+    #                 observed_dates.get((subject_id, reference_session), ""),
+    #                 observed_dates.get((subject_id, session), ""),
+    #             )
+    #             row[f"ses-{s_label}_intervalFromRepeatBaseline_weeks"] = "" if weeks is None else weeks
+    #             row[f"ses-{s_label}_interval_valid"] = "" if weeks is None else bool_text(weeks >= 0)
+    #             standard_weeks = STANDARD_INTERVAL_WEEKS.get(session)
+    #             if weeks is not None and standard_weeks is not None:
+    #                 row[f"ses-{s_label}_intervalDeviationFromStandard_weeks"] = round(weeks - standard_weeks, 2)
+    #             else:
+    #                 row[f"ses-{s_label}_intervalDeviationFromStandard_weeks"] = ""
+    #     subject_redcap = redcap[redcap["subject_id"] == subject_id]
+    #     row["total_ASAP_count"] = int(subject_redcap["session"].map(lambda x: clean(x).upper().startswith("ASAP")).sum())
+    #     session_flags = [
+    #         row.get(f"ses-{excel_safe_label(session)}_session_completed") == "True"
+    #         for session in arm_sessions["session"]
+    #     ]
+    #     missing_sessions = [
+    #         session
+    #         for session in arm_sessions["session"]
+    #         if row.get(f"ses-{excel_safe_label(session)}_session_completed") != "True"
+    #     ]
+    #     row["complete_all_expected_experiment_sessions"] = bool_text(all(session_flags))
+    #     row["Nof_missing_expected_experiment_sessions"] = len(missing_sessions)
+    #     row["missing_expected_experiment_sessions"] = "; ".join(missing_sessions)
+    #     row["complete_all_experiment_sessions"] = row["complete_all_expected_experiment_sessions"]
+    #     qn_subject = qn[qn["subject_id"] == subject_id]
+    #     ant_subject = beh[(beh["subject_id"] == subject_id) & (beh["domain"] == "ANT")]
+    #     self_subject = beh[(beh["subject_id"] == subject_id) & (beh["domain"] == "selfOthers") & (beh["item"].str.startswith("run"))]
+    #     mri_subject = mri[mri["subject_id"] == subject_id]
+    #     row["complete_all_instrument"] = bool_text(not qn_subject.empty and (qn_subject["status"] == "complete").all())
+    #     row["complete_all_ANT"] = bool_text(not ant_subject.empty and (ant_subject["status"] == "complete").all())
+    #     row["all_MRI_QC_passed"] = bool_text(not mri_subject.empty and (mri_subject["qc_status"] == "pass").all())
+    #     row["all_selfOther_QC_passed"] = bool_text(not self_subject.empty and (self_subject["qc_status"] == "pass").all())
+    #     row["subject_QC_pass"] = bool_text(
+    #         row["complete_all_expected_experiment_sessions"] == "True"
+    #         and row["complete_all_instrument"] == "True"
+    #         and row["complete_all_ANT"] == "True"
+    #         and row["all_MRI_QC_passed"] == "True"
+    #         and row["all_selfOther_QC_passed"] == "True"
+    #     )
+    #     rows.append(row)
+    # base_cols = ["subject_id", "arm", "dropout_status"]
+    status_map = {
+        1: "Active",
+        2: "Withdrawn",
+        3: "Ineligible",
+        4: "Completed",
+        5: "Other",
+    }
+
+    eligible_groups = {1, 2, 4}
+
+    # Calculate questionnaire activity dates once, outside the subject loop
+    date_cols = [c for c in qn.columns if "date" in c.lower()]
+
+    qn_dates = qn.copy()
+
+    for col in date_cols:
+        qn_dates[col] = pd.to_datetime(qn_dates[col], errors="coerce")
+
+    if date_cols:
+        last_activity = (
+            qn_dates
+            .groupby("subject_id")[date_cols]
+            .max()
+            .max(axis=1)
+        )
+    else:
+        last_activity = pd.Series(dtype="datetime64[ns]")
+
+    current_time = pd.Timestamp.now()
+    three_months = pd.Timedelta(days=90)
+
+
     for subject_id in arm_subjects:
-        subject_record = clinician_data[clinician_data["subject_id"] == subject_id]
-        date_cols = [c for c in qn.columns if 'date' in c]
-        qn_dates = qn.copy()
-        for col in date_cols:
-            qn_dates[col] = pd.to_datetime(qn_dates[col], errors='coerce')
-        last_activity = qn_dates.groupby('subject_id')[date_cols].max().max(axis=1)
-        current_time = datetime.now()
-        three_months = timedelta(days=90)
-        raw_status = ""
-        if "participant_status" in subject_record.columns:
-            raw_status = str(subject_record["participant_status"].iloc[0])
-        if raw_status in status_map:
-            dropout_status = status_map[raw_status]
-        screening_record = subject_record[subject_record['redcap_event_name'].str.contains('screening', case=False, na=False)]
-        if screening_record.empty:
-            screening_complete_val = False
+
+        subject_record = clinician_data[
+            clinician_data["subject_id"] == subject_id
+        ]
+
+        # Restrict status values to the subject_status REDCap event
+        subject_status_record = subject_record[
+            subject_record["redcap_event_name"]
+            .str.contains("subject_status", case=False, na=False)
+        ]
+
+        if subject_status_record.empty:
+            participant_status_val = None
+            subject_status_complete_val = False
             elig_val = None
+
         else:
-            # Safely get the status and group from the first screening record
-            screening_complete_val = str(screening_record['eligibility_form_complete'].iloc[0]).strip() == '2'
-            elig_val = screening_record['elig_group'].iloc[0]
-        current_event = subject_record['redcap_event_name'] if not subject_record.empty else ""
-        if not screening_complete_val:
-            dropout_status = 'Screen_not_complete'
-        elif str(elig_val) not in ["1", "2", "3"]:
-            dropout_status = 'Screened_not_Eligible'
-        elif (len(current_event) == 19 and arm == 'arm1') or (len(current_event) == 4 and arm == 'arm2'):
-            dropout_status = 'Completed'
+            # Get the last nonmissing participant_status value
+            participant_status_values = pd.to_numeric(
+                subject_status_record["participant_status"],
+                errors="coerce",
+            ).dropna()
+
+            participant_status_val = (
+                int(participant_status_values.iloc[-1])
+                if not participant_status_values.empty
+                else None
+            )
+
+            # Get the last nonmissing subject_status_complete value
+            complete_values = pd.to_numeric(
+                subject_status_record["subject_status_complete"],
+                errors="coerce",
+            ).dropna()
+
+            subject_status_complete_val = (
+                not complete_values.empty
+                and int(complete_values.iloc[-1]) == 2
+            )
+
+            # Get the last nonmissing eligibility-group value
+            elig_values = pd.to_numeric(
+                subject_status_record["elig_group"],
+                errors="coerce",
+            ).dropna()
+
+            elig_val = (
+                int(elig_values.iloc[-1])
+                if not elig_values.empty
+                else None
+            )
+
+        # Determine participant/dropout status
+        if not subject_status_complete_val:
+            dropout_status = "subject_status_not_complete"
+
+        # A recorded participant_status takes priority
+        elif participant_status_val in status_map:
+            dropout_status = status_map[participant_status_val]
+
+        # Use eligibility only when participant_status is missing or invalid
+        elif elig_val is None:
+            dropout_status = "eligibility_missing"
+
+        elif elig_val not in eligible_groups:
+            dropout_status = "subject_status_not_Eligible"
+
         else:
-            # Fallback logic: check for last activity
+            # Fallback: determine status from most recent activity
             last_date = last_activity.get(subject_id)
-            if pd.notna(last_date) and (current_time - last_date) <= three_months:
+
+            if (
+                pd.notna(last_date)
+                and current_time - last_date <= three_months
+            ):
                 dropout_status = "Active"
             else:
                 dropout_status = "need to review"
-        row: dict[str, Any] = {"subject_id": subject_id, "arm": arm, "dropout_status": dropout_status}
+
+        row: dict[str, Any] = {
+            "subject_id": subject_id,
+            "arm": arm,
+            "dropout_status": dropout_status,
+        }
+
         for session in arm_sessions["session"]:
             s_label = excel_safe_label(session)
-            qn_s = qn[(qn["subject_id"] == subject_id) & (qn["session"] == session)].sort_values("instrument")
+
+            qn_s = qn[
+                (qn["subject_id"] == subject_id)
+                & (qn["session"] == session)
+            ].sort_values("instrument")
+
             for _, item in qn_s.iterrows():
                 q_label = item_label(item["instrument"])
                 row[f"ses-{s_label}_qn-{q_label}_date"] = item["date"]
                 row[f"ses-{s_label}_qn-{q_label}_status"] = item["status"]
+
             ant_s = beh[
                 (beh["subject_id"] == subject_id)
                 & (beh["session"] == session)
                 & (beh["domain"] == "ANT")
             ]
+
             if not ant_s.empty:
                 row[f"ses-{s_label}_beh-ANT_status"] = ant_s.iloc[0]["status"]
+
             self_s = beh[
                 (beh["subject_id"] == subject_id)
                 & (beh["session"] == session)
                 & (beh["domain"] == "selfOthers")
             ]
+
             npractice = self_s[self_s["item"] == "Npractice"]
+
             if not npractice.empty:
-                row[f"ses-{s_label}_beh-selfOthers_Npractice"] = npractice.iloc[0]["value"]
+                row[f"ses-{s_label}_beh-selfOthers_Npractice"] = (
+                    npractice.iloc[0]["value"]
+                )
+
             for run in ("run1", "run2"):
                 run_s = self_s[self_s["item"] == run]
+
                 if not run_s.empty:
                     run_row = run_s.iloc[0]
-                    row[f"ses-{s_label}_beh-selfOthers_{run}_status"] = run_row["status"]
+                    row[f"ses-{s_label}_beh-selfOthers_{run}_status"] = (
+                        run_row["status"]
+                    )
                     row[f"ses-{s_label}_beh-selfOthers_{run}_acc"] = ""
                     row[f"ses-{s_label}_beh-selfOthers_{run}_missingRate"] = ""
-            mri_s = mri[(mri["subject_id"] == subject_id) & (mri["session"] == session)].sort_values("scan_or_run")
+
+            mri_s = mri[
+                (mri["subject_id"] == subject_id)
+                & (mri["session"] == session)
+            ].sort_values("scan_or_run")
+
             for _, item in mri_s.iterrows():
-                row[f"ses-{s_label}_mri-{item_label(item['scan_or_run'])}_qc_status"] = item["qc_status"]
-            summary = session_summary_values(subject_id, session, qn, beh, mri)
+                row[
+                    f"ses-{s_label}_mri-"
+                    f"{item_label(item['scan_or_run'])}_qc_status"
+                ] = item["qc_status"]
+
+            summary = session_summary_values(
+                subject_id,
+                session,
+                qn,
+                beh,
+                mri,
+            )
+
             for key, value in summary.items():
-                row[f"ses-{s_label}_{key}"] = bool_text(value) if isinstance(value, bool) else value
-            if session != "Baseline":
-                weeks = interval_weeks(
-                    observed_dates.get((subject_id, "Baseline"), ""),
-                    observed_dates.get((subject_id, session), ""),
+                row[f"ses-{s_label}_{key}"] = (
+                    bool_text(value)
+                    if isinstance(value, bool)
+                    else value
                 )
-                row[f"ses-{s_label}_intervalFromBaseline_weeks"] = "" if weeks is None else weeks
-                row[f"ses-{s_label}_interval_valid"] = "" if weeks is None else bool_text(weeks >= 0)
-        subject_redcap = redcap[redcap["subject_id"] == subject_id]
-        row["total_ASAP_count"] = int(subject_redcap["session"].map(lambda x: clean(x).upper().startswith("ASAP")).sum())
+
+            if session in INTERVAL_SUMMARY_SESSIONS:
+                reference_session = (
+                    "Baseline"
+                    if session == "Repeat Baseline"
+                    else "Repeat Baseline"
+                )
+
+                weeks = interval_weeks(
+                    observed_dates.get(
+                        (subject_id, reference_session),
+                        "",
+                    ),
+                    observed_dates.get(
+                        (subject_id, session),
+                        "",
+                    ),
+                )
+
+                row[f"ses-{s_label}_intervalFromRepeatBaseline_weeks"] = (
+                    ""
+                    if weeks is None
+                    else weeks
+                )
+
+                row[f"ses-{s_label}_interval_valid"] = (
+                    ""
+                    if weeks is None
+                    else bool_text(weeks >= 0)
+                )
+
+                standard_weeks = STANDARD_INTERVAL_WEEKS.get(session)
+
+                if weeks is not None and standard_weeks is not None:
+                    row[
+                        f"ses-{s_label}_"
+                        "intervalDeviationFromStandard_weeks"
+                    ] = round(weeks - standard_weeks, 2)
+                else:
+                    row[
+                        f"ses-{s_label}_"
+                        "intervalDeviationFromStandard_weeks"
+                    ] = ""
+
+        subject_redcap = redcap[
+            redcap["subject_id"] == subject_id
+        ]
+
+        row["total_ASAP_count"] = int(
+            subject_redcap["session"]
+            .map(lambda x: clean(x).upper().startswith("ASAP"))
+            .sum()
+        )
+
         session_flags = [
-            row.get(f"ses-{excel_safe_label(session)}_session_completed") == "True"
+            row.get(
+                f"ses-{excel_safe_label(session)}_session_completed"
+            ) == "True"
             for session in arm_sessions["session"]
         ]
+
         missing_sessions = [
             session
             for session in arm_sessions["session"]
-            if row.get(f"ses-{excel_safe_label(session)}_session_completed") != "True"
+            if row.get(
+                f"ses-{excel_safe_label(session)}_session_completed"
+            ) != "True"
         ]
-        row["complete_all_expected_experiment_sessions"] = bool_text(all(session_flags))
-        row["Nof_missing_expected_experiment_sessions"] = len(missing_sessions)
-        row["missing_expected_experiment_sessions"] = "; ".join(missing_sessions)
-        row["complete_all_experiment_sessions"] = row["complete_all_expected_experiment_sessions"]
-        qn_subject = qn[qn["subject_id"] == subject_id]
-        ant_subject = beh[(beh["subject_id"] == subject_id) & (beh["domain"] == "ANT")]
-        self_subject = beh[(beh["subject_id"] == subject_id) & (beh["domain"] == "selfOthers") & (beh["item"].str.startswith("run"))]
-        mri_subject = mri[mri["subject_id"] == subject_id]
-        row["complete_all_instrument"] = bool_text(not qn_subject.empty and (qn_subject["status"] == "complete").all())
-        row["complete_all_ANT"] = bool_text(not ant_subject.empty and (ant_subject["status"] == "complete").all())
-        row["all_MRI_QC_passed"] = bool_text(not mri_subject.empty and (mri_subject["qc_status"] == "pass").all())
-        row["all_selfOther_QC_passed"] = bool_text(not self_subject.empty and (self_subject["qc_status"] == "pass").all())
+
+        row["complete_all_expected_experiment_sessions"] = bool_text(
+            all(session_flags)
+        )
+
+        row["Nof_missing_expected_experiment_sessions"] = len(
+            missing_sessions
+        )
+
+        row["missing_expected_experiment_sessions"] = "; ".join(
+            missing_sessions
+        )
+
+        row["complete_all_experiment_sessions"] = (
+            row["complete_all_expected_experiment_sessions"]
+        )
+
+        qn_subject = qn[
+            qn["subject_id"] == subject_id
+        ]
+
+        ant_subject = beh[
+            (beh["subject_id"] == subject_id)
+            & (beh["domain"] == "ANT")
+        ]
+
+        self_subject = beh[
+            (beh["subject_id"] == subject_id)
+            & (beh["domain"] == "selfOthers")
+            & (beh["item"].str.startswith("run", na=False))
+        ]
+
+        mri_subject = mri[
+            mri["subject_id"] == subject_id
+        ]
+
+        row["complete_all_instrument"] = bool_text(
+            not qn_subject.empty
+            and (qn_subject["status"] == "complete").all()
+        )
+
+        row["complete_all_ANT"] = bool_text(
+            not ant_subject.empty
+            and (ant_subject["status"] == "complete").all()
+        )
+
+        row["all_MRI_QC_passed"] = bool_text(
+            not mri_subject.empty
+            and (mri_subject["qc_status"] == "pass").all()
+        )
+
+        row["all_selfOther_QC_passed"] = bool_text(
+            not self_subject.empty
+            and (self_subject["qc_status"] == "pass").all()
+        )
+
         row["subject_QC_pass"] = bool_text(
             row["complete_all_expected_experiment_sessions"] == "True"
             and row["complete_all_instrument"] == "True"
@@ -1197,8 +1559,19 @@ def build_subject_wise(
             and row["all_MRI_QC_passed"] == "True"
             and row["all_selfOther_QC_passed"] == "True"
         )
+
         rows.append(row)
-    base_cols = ["subject_id", "arm", "dropout_status"]
+
+
+    base_cols = [
+        "subject_id",
+        "arm",
+        "dropout_status",
+    ]
+##############################
+#replace before
+################################
+
     summary_cols = [
         "total_ASAP_count",
         "complete_all_expected_experiment_sessions",
@@ -1452,42 +1825,120 @@ def qc_table_by_subject(arm: str, df: pd.DataFrame, label_col: str | None = None
 def table_interval_summary(arm: str, subject_wise: pd.DataFrame, sessions: Iterable[str]) -> pd.DataFrame:
     rows = []
     for session in sessions:
-        if session == "Baseline":
+        if session not in INTERVAL_SUMMARY_SESSIONS:
             continue
         label = excel_safe_label(session)
         completed_col = f"ses-{label}_session_completed"
-        interval_col = f"ses-{label}_intervalFromBaseline_weeks"
+        interval_col = f"ses-{label}_intervalFromRepeatBaseline_weeks"
         valid_col = f"ses-{label}_interval_valid"
         if completed_col not in subject_wise.columns:
             continue
         intervals = pd.to_numeric(subject_wise.get(interval_col, pd.Series(dtype=str)), errors="coerce")
-        valid = subject_wise.get(valid_col, pd.Series([""] * len(subject_wise))).map(clean) == "True"
-        completed = subject_wise[completed_col].map(clean) == "True"
+        completed = intervals.notna()
+        valid = completed & (subject_wise.get(valid_col, pd.Series([""] * len(subject_wise))).map(clean) == "True")
+        standard_weeks = STANDARD_INTERVAL_WEEKS.get(session, "")
+        deviations = intervals - standard_weeks if standard_weeks != "" else pd.Series([pd.NA] * len(subject_wise))
         rows.append(
             {
                 "arm": arm,
                 "session": session,
+                "reference_session": "Baseline" if session == "Repeat Baseline" else "Repeat Baseline",
+                "standard_interval_weeks": standard_weeks,
                 "completed_NofSubjects": int(completed.sum()),
                 "valid_interval_NofSubjects": int(valid.sum()),
                 "invalid_interval_NofSubjects": int((completed & ~valid).sum()),
                 "invalid_or_missing_interval_subjects": subject_list(subject_wise.loc[completed & ~valid, "subject_id"]),
-                "mean_intervalFromBaseline_weeks": round(float(intervals[valid].mean()), 2) if valid.any() else "",
-                "sd_intervalFromBaseline_weeks": round(float(intervals[valid].std()), 2) if valid.sum() > 1 else "",
-                "min_intervalFromBaseline_weeks": round(float(intervals[valid].min()), 2) if valid.any() else "",
-                "max_intervalFromBaseline_weeks": round(float(intervals[valid].max()), 2) if valid.any() else "",
+                "mean_intervalFromRepeatBaseline_weeks": round(float(intervals[valid].mean()), 2) if valid.any() else "",
+                "sd_intervalFromRepeatBaseline_weeks": round(float(intervals[valid].std()), 2) if valid.sum() > 1 else "",
+                "min_intervalFromRepeatBaseline_weeks": round(float(intervals[valid].min()), 2) if valid.any() else "",
+                "max_intervalFromRepeatBaseline_weeks": round(float(intervals[valid].max()), 2) if valid.any() else "",
+                "mean_deviationFromStandard_weeks": round(float(deviations[valid].mean()), 2) if standard_weeks != "" and valid.any() else "",
             }
         )
     columns = [
         "arm",
         "session",
+        "reference_session",
+        "standard_interval_weeks",
         "completed_NofSubjects",
         "valid_interval_NofSubjects",
         "invalid_interval_NofSubjects",
         "invalid_or_missing_interval_subjects",
-        "mean_intervalFromBaseline_weeks",
-        "sd_intervalFromBaseline_weeks",
-        "min_intervalFromBaseline_weeks",
-        "max_intervalFromBaseline_weeks",
+        "mean_intervalFromRepeatBaseline_weeks",
+        "sd_intervalFromRepeatBaseline_weeks",
+        "min_intervalFromRepeatBaseline_weeks",
+        "max_intervalFromRepeatBaseline_weeks",
+        "mean_deviationFromStandard_weeks",
+    ]
+    return pd.DataFrame(rows, columns=columns)
+
+
+def table_te_scan_interval_summary(arm: str, subject_wise: pd.DataFrame, redcap: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    te_dates = build_session_field_dates(redcap, "peas_date_of_visit", source="clinician")
+    scan_dates = build_session_field_dates(redcap, "scan_date", source="clinician")
+    arm_subject_wise = subject_wise[subject_wise["arm"] == arm]
+    for te_session, scan_sessions in TE_SCAN_PAIRS:
+        te_label = excel_safe_label(te_session)
+        te_completed_col = f"ses-{te_label}_session_completed"
+        if te_completed_col not in arm_subject_wise.columns:
+            continue
+        intervals = []
+        scan_session_values = []
+        te_date_values = []
+        for _, row in arm_subject_wise.iterrows():
+            subject_id = row["subject_id"]
+            scan_session = next(
+                (candidate for candidate in scan_sessions if scan_dates.get((subject_id, candidate), "")),
+                "",
+            )
+            te_date = te_dates.get((subject_id, te_session), "")
+            days = interval_days(
+                te_date,
+                scan_dates.get((subject_id, scan_session), "") if scan_session else "",
+            )
+            intervals.append(days)
+            scan_session_values.append(scan_session)
+            te_date_values.append(te_date)
+        interval_series = pd.to_numeric(pd.Series(intervals, index=arm_subject_wise.index), errors="coerce")
+        scan_session_series = pd.Series(scan_session_values, index=arm_subject_wise.index)
+        te_date_series = pd.Series(te_date_values, index=arm_subject_wise.index)
+        te_present = te_date_series.map(clean) != ""
+        scan_present = scan_session_series.map(clean) != ""
+        completed = te_present & scan_present
+        valid = completed & interval_series.notna() & (interval_series >= 0)
+        deviations = interval_series - STANDARD_TE_SCAN_INTERVAL_DAYS
+        rows.append(
+            {
+                "arm": arm,
+                "te_session": te_session,
+                "scan_session": " or ".join(scan_sessions),
+                "standard_interval_days": STANDARD_TE_SCAN_INTERVAL_DAYS,
+                "completed_pair_NofSubjects": int(completed.sum()),
+                "valid_interval_NofSubjects": int(valid.sum()),
+                "invalid_interval_NofSubjects": int((completed & ~valid).sum()),
+                "invalid_or_missing_interval_subjects": subject_list(arm_subject_wise.loc[completed & ~valid, "subject_id"]),
+                "mean_interval_days": round(float(interval_series[valid].mean()), 2) if valid.any() else "",
+                "sd_interval_days": round(float(interval_series[valid].std()), 2) if valid.sum() > 1 else "",
+                "min_interval_days": round(float(interval_series[valid].min()), 2) if valid.any() else "",
+                "max_interval_days": round(float(interval_series[valid].max()), 2) if valid.any() else "",
+                "mean_deviationFromStandard_days": round(float(deviations[valid].mean()), 2) if valid.any() else "",
+            }
+        )
+    columns = [
+        "arm",
+        "te_session",
+        "scan_session",
+        "standard_interval_days",
+        "completed_pair_NofSubjects",
+        "valid_interval_NofSubjects",
+        "invalid_interval_NofSubjects",
+        "invalid_or_missing_interval_subjects",
+        "mean_interval_days",
+        "sd_interval_days",
+        "min_interval_days",
+        "max_interval_days",
+        "mean_deviationFromStandard_days",
     ]
     return pd.DataFrame(rows, columns=columns)
 
@@ -1569,7 +2020,7 @@ def table_asap_summary(arm: str, subject_wise: pd.DataFrame) -> pd.DataFrame:
 #         ("Table 4-2. SelfOthers QC pass rate by subject", qc_table_by_subject(arm, self_qc)),
 #         ("Table 5. MRI QC pass rate by session", qc_table_by_session(arm, mri, "MRI")),
 #         ("Table 5-2. MRI QC pass rate by subject", qc_table_by_subject(arm, mri, "scan_or_run")),
-#         ("Table 6. Session interval summary after Baseline", table_interval_summary(arm, subject_wise, arm_sessions)),
+#         ("Table 6. Session interval summary from Repeat Baseline", table_interval_summary(arm, subject_wise, arm_sessions)),
 #         ("Table 7. ASAP summary", table_asap_summary(arm, subject_wise)),
 #         ("Table 8. Participant-level QA readiness summary", table_readiness(arm, subject_wise)),
 #     ]
@@ -1580,6 +2031,7 @@ def build_group_tables(
     mri: pd.DataFrame,
     subject_wise: pd.DataFrame,
     arm_sessions: list[str],
+    redcap: pd.DataFrame,
 ) -> list[tuple[str, pd.DataFrame]]:
     
     # 1. Extract valid subjects based on dropout_status
@@ -1610,7 +2062,8 @@ def build_group_tables(
         ("Table 4-2. SelfOthers QC pass rate by subject", qc_table_by_subject(arm, self_qc)),
         ("Table 5. MRI QC pass rate by session", qc_table_by_session(arm, mri_filtered, "MRI")),
         ("Table 5-2. MRI QC pass rate by subject", qc_table_by_subject(arm, mri_filtered, "scan_or_run")),
-        ("Table 6. Session interval summary after Baseline", table_interval_summary(arm, subject_wise_filtered, arm_sessions)),
+        ("Table 6. Session interval summary from Repeat Baseline", table_interval_summary(arm, subject_wise_filtered, arm_sessions)),
+        ("Table 6-2. TE- scan Session interval summary", table_te_scan_interval_summary(arm, subject_wise, redcap)),
         ("Table 7. ASAP summary", table_asap_summary(arm, subject_wise_filtered)),
         ("Table 8. Participant-level QA readiness summary", table_readiness(arm, subject_wise_filtered)),
     ]
@@ -1681,7 +2134,7 @@ def build_outputs(input_dir: Path, output_dir: Path) -> None:
             .tolist()
         )
         subject_wise = build_subject_wise(arm, subjects, required_sessions, qn, beh, mri, redcap)
-        tables = build_group_tables(arm, qn, beh, mri, subject_wise, arm_sessions)
+        tables = build_group_tables(arm, qn, beh, mri, subject_wise, arm_sessions, redcap)
         out_path = output_dir / f"QA_summary_{arm}.xlsx"
         validate_final_outputs(out_path, subject_wise, tables)
         with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
